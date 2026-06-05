@@ -1,0 +1,32 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python environments
+.venv/
+venv/
+env/
+
+# Logs and local training outputs
+runs/
+logs/
+lightning_logs/
+wandb/
+swanlog/
+models/train*/
+demo/*_output/
+demo/camclone_wan22_output/
+
+# Large model artifacts
+models/*
+!models/placeholder.txt
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+
