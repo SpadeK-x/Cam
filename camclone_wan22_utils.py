@@ -235,9 +235,13 @@ def _as_wan_model_config_path(model_path):
     return config_path
 
 
-def _wan_model_kwargs_from_config(config):
+def _wan_model_kwargs_from_config(config, state_dict=None):
+    has_image_cross_attention = bool(
+        state_dict is not None
+        and any("k_img" in key or key.startswith("img_emb.") for key in state_dict)
+    )
     return {
-        "has_image_input": config.get("has_image_input", config.get("in_dim") == 36),
+        "has_image_input": has_image_cross_attention,
         "patch_size": tuple(config.get("patch_size", (1, 2, 2))),
         "in_dim": config["in_dim"],
         "dim": config["dim"],
@@ -285,7 +289,7 @@ def _load_wan_model_from_config_shards(model_manager, model_path, torch_dtype, d
     load_errors = []
     for label, candidate_state_dict in _wan_state_dict_candidates(state_dict):
         with init_weights_on_device():
-            model = WanModel(**_wan_model_kwargs_from_config(config))
+            model = WanModel(**_wan_model_kwargs_from_config(config, candidate_state_dict))
         try:
             missing_keys, unexpected_keys = model.load_state_dict(candidate_state_dict, strict=False, assign=True)
         except RuntimeError as exc:
@@ -389,6 +393,14 @@ def inject_lora_adapters(
         for name, module in model.named_modules()
         if _matches_lora_target(name, module, expert_scope)
     ]
+    if not targets and expert_scope == "high":
+        targets = [
+            (name, module)
+            for name, module in model.named_modules()
+            if _matches_lora_target(name, module, "all")
+        ]
+        if targets:
+            print("No explicit high-noise module names found; treating the loaded DiT as the high-noise expert.")
     if not targets and not allow_no_expert_match:
         raise RuntimeError(
             "No LoRA target modules matched. For Wan2.2 MoE, check high-noise expert module names; "

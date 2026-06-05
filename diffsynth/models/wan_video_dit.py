@@ -179,20 +179,20 @@ class CrossAttention(nn.Module):
         self.attn = AttentionModule(self.num_heads)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        # if self.has_image_input:
-        img = y[:, :257]
-        ctx = y[:, 257:]
-        # else:
-        #     ctx = y
+        if self.has_image_input:
+            img = y[:, :257]
+            ctx = y[:, 257:]
+        else:
+            ctx = y
         q = self.norm_q(self.q(x))
         k = self.norm_k(self.k(ctx))
         v = self.v(ctx)
         x = self.attn(q, k, v)
-        # if self.has_image_input:
-        k_img = self.norm_k_img(self.k_img(img))
-        v_img = self.v_img(img)
-        y = flash_attention(q, k_img, v_img, num_heads=self.num_heads)
-        x = x + y
+        if self.has_image_input:
+            k_img = self.norm_k_img(self.k_img(img))
+            v_img = self.v_img(img)
+            y = flash_attention(q, k_img, v_img, num_heads=self.num_heads)
+            x = x + y
         return self.o(x)
 
 
@@ -343,10 +343,11 @@ class WanModel(torch.nn.Module):
         t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
         context = self.text_embedding(context)
         
-        # # if self.has_image_input:
-        x = torch.cat([x, y], dim=1)  # (b, c_x + c_y, f, h, w)
-        clip_embdding = self.img_emb(clip_feature)
-        context = torch.cat([clip_embdding, context], dim=1)  # [3, 769, 1536]
+        if y is not None:
+            x = torch.cat([x, y], dim=1)  # (b, c_x + c_y, f, h, w)
+        if self.has_image_input and clip_feature is not None:
+            clip_embdding = self.img_emb(clip_feature)
+            context = torch.cat([clip_embdding, context], dim=1)  # [3, 769, 1536]
         
         # add for camclone
         if ref_latents is not None and content_latents is not None:

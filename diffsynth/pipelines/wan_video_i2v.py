@@ -392,17 +392,18 @@ def model_fn_wan_video(
     t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
     context = dit.text_embedding(context)
     
-    # if dit.has_image_input:
     x = x.to(context.device)
-    x = torch.cat([x, y], dim=1)  # (b, c_x + c_y, f, h, w)
+    if y is not None:
+        x = torch.cat([x, y], dim=1)  # (b, c_x + c_y, f, h, w)
     if ref_latents is not None and content_latents is not None:
         ref_latents, content_latents = ref_latents.to(context.device), content_latents.to(context.device)
         ref_latents = pad_latents_to_channels(ref_latents, x.shape[1])
         content_latents = pad_latents_to_channels(content_latents, x.shape[1])
         x = torch.cat([x, ref_latents, content_latents], dim=2)
 
-    clip_embdding = dit.img_emb(clip_feature)
-    context = torch.cat([clip_embdding, context], dim=1)
+    if dit.has_image_input and clip_feature is not None:
+        clip_embdding = dit.img_emb(clip_feature)
+        context = torch.cat([clip_embdding, context], dim=1)
     x, (f, h, w) = dit.patchify(x)
     
     freqs = torch.cat([
