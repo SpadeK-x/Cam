@@ -182,12 +182,12 @@ def normalize_model_path_groups(model_paths: Iterable[str]):
     shard_files_by_parent = {}
     for path in expanded_paths:
         if os.path.isdir(path):
-            if os.path.exists(os.path.join(path, "config.json")):
-                groups.append(path)
-                continue
             checkpoint_files = _checkpoint_files_in_dir(path)
             if checkpoint_files:
                 groups.append(checkpoint_files)
+                continue
+            if os.path.exists(os.path.join(path, "config.json")):
+                groups.append(path)
                 continue
             raise ValueError(f"Model directory contains no supported checkpoint files: {path}")
         if _is_checkpoint_file(path):
