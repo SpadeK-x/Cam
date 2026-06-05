@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 from typing import Iterable, List, Optional, Tuple
 
@@ -10,6 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from diffsynth import ModelManager, WanVideoI2VPipeline
+from diffsynth.models.utils import init_weights_on_device, load_state_dict
+from diffsynth.models.wan_video_dit import WanModel
 from einops import rearrange
 from PIL import Image
 from torchvision.transforms import v2
@@ -212,13 +215,111 @@ def normalize_model_path_groups(model_paths: Iterable[str]):
     return groups
 
 
+def _as_wan_model_config_path(model_path):
+    if isinstance(model_path, list):
+        if not model_path:
+            return None
+        parent = os.path.dirname(model_path[0])
+    elif os.path.isdir(model_path):
+        parent = model_path
+    else:
+        return None
+    config_path = os.path.join(parent, "config.json")
+    if not os.path.exists(config_path):
+        return None
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    architectures = config.get("architectures") or [config.get("_class_name")]
+    if "WanModel" not in architectures:
+        return None
+    return config_path
+
+
+def _wan_model_kwargs_from_config(config):
+    return {
+        "has_image_input": config.get("has_image_input", config.get("in_dim") == 36),
+        "patch_size": tuple(config.get("patch_size", (1, 2, 2))),
+        "in_dim": config["in_dim"],
+        "dim": config["dim"],
+        "ffn_dim": config["ffn_dim"],
+        "freq_dim": config.get("freq_dim", 256),
+        "text_dim": config.get("text_dim", 4096),
+        "out_dim": config.get("out_dim", 16),
+        "num_heads": config["num_heads"],
+        "num_layers": config["num_layers"],
+        "eps": config.get("eps", 1e-6),
+    }
+
+
+def _strip_state_dict_prefix(state_dict, prefix):
+    if not state_dict or not all(key.startswith(prefix) for key in state_dict):
+        return None
+    return {key[len(prefix):]: value for key, value in state_dict.items()}
+
+
+def _wan_state_dict_candidates(state_dict):
+    candidates = [("original", state_dict)]
+    for prefix in ("model.", "module.", "dit.", "transformer."):
+        stripped = _strip_state_dict_prefix(state_dict, prefix)
+        if stripped is not None:
+            candidates.append((f"strip:{prefix}", stripped))
+    for label, candidate in list(candidates):
+        converted, _ = WanModel.state_dict_converter().from_diffusers(candidate)
+        if converted:
+            candidates.append((f"{label}:from_diffusers", converted))
+    return candidates
+
+
+def _load_wan_model_from_config_shards(model_manager, model_path, torch_dtype, device):
+    config_path = _as_wan_model_config_path(model_path)
+    if config_path is None:
+        return False
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    shard_paths = model_path if isinstance(model_path, list) else _checkpoint_files_in_dir(model_path)
+    state_dict = {}
+    for shard_path in shard_paths:
+        state_dict.update(load_state_dict(shard_path, torch_dtype=torch_dtype))
+
+    load_errors = []
+    for label, candidate_state_dict in _wan_state_dict_candidates(state_dict):
+        with init_weights_on_device():
+            model = WanModel(**_wan_model_kwargs_from_config(config))
+        try:
+            missing_keys, unexpected_keys = model.load_state_dict(candidate_state_dict, strict=False, assign=True)
+        except RuntimeError as exc:
+            load_errors.append((label, str(exc).splitlines()[:10]))
+            continue
+        if len(missing_keys) == 0 and len(unexpected_keys) == 0:
+            break
+        load_errors.append((label, [f"missing={len(missing_keys)} unexpected={len(unexpected_keys)}", f"missing[:10]={missing_keys[:10]}", f"unexpected[:10]={unexpected_keys[:10]}"]))
+    else:
+        print("    WanModel config-based loading failed for all key candidates:")
+        for label, lines in load_errors:
+            print(f"    Candidate {label}:")
+            for line in lines:
+                print(f"      {line}")
+        raise RuntimeError(
+            "Wan2.2 WanModel checkpoint did not match the local WanModel architecture. "
+            "The loader reached the config-based branch, but key names/shapes still need a converter."
+        )
+    model = model.eval().to(dtype=torch_dtype, device=device)
+    model_manager.model.append(model)
+    model_manager.model_path.append(os.path.dirname(config_path))
+    model_manager.model_name.append("wan_video_dit")
+    print(f"    Loaded WanModel from sharded config folder: {os.path.dirname(config_path)}")
+    return True
+
+
 def load_wan_i2v_pipeline(model_paths: Iterable[str], torch_dtype=torch.bfloat16, device="cpu"):
     model_paths = normalize_model_path_groups(model_paths)
     if not model_paths:
         raise ValueError("At least one Wan2.2 I2V model path must be provided via --model_paths.")
     model_manager = ModelManager(torch_dtype=torch_dtype, device=device)
     for model_path in model_paths:
-        model_manager.load_model(model_path)
+        if not _load_wan_model_from_config_shards(model_manager, model_path, torch_dtype, device):
+            model_manager.load_model(model_path)
     pipe = WanVideoI2VPipeline.from_model_manager(model_manager)
     missing = [
         name
