@@ -1,3 +1,4 @@
+import glob
 import os
 from typing import Iterable, List, Optional, Tuple
 
@@ -155,12 +156,69 @@ HIGH_NOISE_KEYWORDS = ("high", "high_noise", "highnoise")
 LOW_NOISE_KEYWORDS = ("low", "low_noise", "lownoise")
 
 
+def _is_checkpoint_file(path):
+    return os.path.isfile(path) and path.split(".")[-1] in {"safetensors", "bin", "ckpt", "pth", "pt"}
+
+
+def _checkpoint_files_in_dir(path):
+    files = []
+    for pattern in ("*.safetensors", "*.bin", "*.ckpt", "*.pth", "*.pt"):
+        files.extend(glob.glob(os.path.join(path, pattern)))
+    return sorted(files)
+
+
+def normalize_model_path_groups(model_paths: Iterable[str]):
+    expanded_paths = []
+    for raw_path in model_paths:
+        if not raw_path:
+            continue
+        matches = sorted(glob.glob(raw_path)) if glob.has_magic(raw_path) else [raw_path]
+        expanded_paths.extend(matches)
+
+    if not expanded_paths:
+        raise ValueError("At least one Wan2.2 I2V model path must be provided via --model_paths.")
+
+    groups = []
+    shard_files_by_parent = {}
+    for path in expanded_paths:
+        if os.path.isdir(path):
+            if os.path.exists(os.path.join(path, "config.json")):
+                groups.append(path)
+                continue
+            checkpoint_files = _checkpoint_files_in_dir(path)
+            if checkpoint_files:
+                groups.append(checkpoint_files)
+                continue
+            raise ValueError(f"Model directory contains no supported checkpoint files: {path}")
+        if _is_checkpoint_file(path):
+            parent = os.path.dirname(path)
+            sibling_shards = _checkpoint_files_in_dir(parent)
+            if len(sibling_shards) > 1 and path in sibling_shards:
+                shard_files_by_parent[parent] = sibling_shards
+            else:
+                groups.append(path)
+            continue
+        if os.path.exists(path):
+            groups.append(path)
+            continue
+        raise FileNotFoundError(f"Model path does not exist: {path}")
+
+    seen_parent_groups = set()
+    for parent, shard_files in shard_files_by_parent.items():
+        key = tuple(shard_files)
+        if key not in seen_parent_groups:
+            groups.append(shard_files)
+            seen_parent_groups.add(key)
+    return groups
+
+
 def load_wan_i2v_pipeline(model_paths: Iterable[str], torch_dtype=torch.bfloat16, device="cpu"):
-    model_paths = [path for path in model_paths if path]
+    model_paths = normalize_model_path_groups(model_paths)
     if not model_paths:
         raise ValueError("At least one Wan2.2 I2V model path must be provided via --model_paths.")
     model_manager = ModelManager(torch_dtype=torch_dtype, device=device)
-    model_manager.load_models(model_paths)
+    for model_path in model_paths:
+        model_manager.load_model(model_path)
     pipe = WanVideoI2VPipeline.from_model_manager(model_manager)
     missing = [
         name
