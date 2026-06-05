@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import re
 from typing import Iterable, List, Optional, Tuple
 
 import imageio
@@ -170,6 +171,15 @@ def _checkpoint_files_in_dir(path):
     return sorted(files)
 
 
+SHARD_FILE_RE = re.compile(r".*-\d{5}-of-\d{5}\.(safetensors|bin|ckpt|pth|pt)$")
+
+
+def _looks_like_sharded_checkpoint_files(files):
+    if len(files) <= 1:
+        return False
+    return all(SHARD_FILE_RE.match(os.path.basename(path)) for path in files)
+
+
 def normalize_model_path_groups(model_paths: Iterable[str]):
     expanded_paths = []
     for raw_path in model_paths:
@@ -186,17 +196,20 @@ def normalize_model_path_groups(model_paths: Iterable[str]):
     for path in expanded_paths:
         if os.path.isdir(path):
             checkpoint_files = _checkpoint_files_in_dir(path)
-            if checkpoint_files:
+            if checkpoint_files and (_looks_like_sharded_checkpoint_files(checkpoint_files) or _as_wan_model_config_path(path) is not None):
                 groups.append(checkpoint_files)
                 continue
             if os.path.exists(os.path.join(path, "config.json")):
                 groups.append(path)
                 continue
+            if checkpoint_files:
+                groups.extend(checkpoint_files)
+                continue
             raise ValueError(f"Model directory contains no supported checkpoint files: {path}")
         if _is_checkpoint_file(path):
             parent = os.path.dirname(path)
             sibling_shards = _checkpoint_files_in_dir(parent)
-            if len(sibling_shards) > 1 and path in sibling_shards:
+            if _looks_like_sharded_checkpoint_files(sibling_shards) and path in sibling_shards:
                 shard_files_by_parent[parent] = sibling_shards
             else:
                 groups.append(path)
